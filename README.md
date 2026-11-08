@@ -7,3 +7,5 @@ Mention the agent account in an issue or comment to give it work, for example:
     @<agent login> add a hello world script
 
 The agent works in its own branch and directory, then answers in the original thread.
+
+hello
