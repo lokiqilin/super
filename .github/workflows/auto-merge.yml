@@ -1,0 +1,105 @@
+# Arms GitHub's auto-merge for pull requests opened from branches in this
+# repository, so nobody has to click "Enable auto-merge" on the PR page.
+# Once auto-merge is enabled, GitHub itself performs the merge when the PR is
+# mergeable (required checks, branch protection and merge conflicts still
+# apply).
+#
+# Why this workflow exists: the repository only has one human account, and the
+# agent cannot enable auto-merge on the user's behalf without another actor.
+# A workflow using the built-in GITHUB_TOKEN can arm auto-merge for it.
+#
+# Limitations:
+# * Only PRs whose head branch lives in this repository are handled. PRs from
+#   forks receive a read-only GITHUB_TOKEN, so they are skipped.
+# * PRs that change files under .github/workflows/ are skipped: merging such a
+#   PR needs the "workflows" permission, which GITHUB_TOKEN never has. Those
+#   PRs have to be merged by a person.
+# * Events triggered with GITHUB_TOKEN do not start other workflow runs
+#   (anti-recursion). The merge itself is the only thing this workflow does,
+#   so that restriction does not affect it.
+
+name: Auto-merge
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  enable-auto-merge:
+    name: Enable auto-merge
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check whether GITHUB_TOKEN may merge this PR
+        id: inspect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          state=$(gh pr view "$PR" --json state --jq .state)
+          if [ "$state" != "OPEN" ]; then
+            echo "::notice::PR #$PR is already $state; nothing to do."
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # GITHUB_TOKEN cannot merge a PR that edits workflow files, because
+          # the token never carries the "workflows" permission.
+          changed=$(gh pr view "$PR" --json files --jq '.files[].path')
+          if grep -Eq '^\.github/workflows/' <<< "$changed"; then
+            echo "::notice::PR #$PR changes .github/workflows/; GITHUB_TOKEN cannot merge it, leaving the merge to a person."
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "eligible=true" >> "$GITHUB_OUTPUT"
+
+      - name: Enable auto-merge
+        if: steps.inspect.outputs.eligible == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          # Mergeability is computed asynchronously right after a PR is opened
+          # or updated. Wait for GitHub to settle instead of failing the run.
+          mergeable="UNKNOWN"
+          for _ in $(seq 1 12); do
+            mergeable=$(gh pr view "$PR" --json mergeable --jq .mergeable)
+            if [ "$mergeable" != "UNKNOWN" ]; then
+              break
+            fi
+            sleep 5
+          done
+
+          if [ "$mergeable" = "CONFLICTING" ]; then
+            echo "::notice::PR #$PR has merge conflicts; resolve them and push to re-run this workflow."
+            exit 0
+          fi
+          if [ "$mergeable" != "MERGEABLE" ]; then
+            echo "::warning::PR #$PR mergeability is $mergeable; leaving auto-merge disabled."
+            exit 0
+          fi
+
+          if [ "$(gh pr view "$PR" --json autoMergeRequest --jq 'if .autoMergeRequest then "yes" else "no" end')" = "yes" ]; then
+            echo "::notice::Auto-merge is already enabled for PR #$PR."
+            exit 0
+          fi
+
+          gh pr merge "$PR" --auto --merge
