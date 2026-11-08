@@ -9,3 +9,7 @@ Mention the agent account in an issue or comment to give it work, for example:
 The agent works in its own branch and directory, then answers in the original thread.
 
 hello
+
+---
+
+— [LokiiArt](https://github.com/lokiiart)
